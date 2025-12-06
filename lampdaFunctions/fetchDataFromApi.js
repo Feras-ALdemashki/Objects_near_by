@@ -106,7 +106,7 @@ export const handler = async (event) => {
         ContentType: "text/csv",
       })
     );
-
+    // just to check details
     console.log(`Uploaded to s3://${BUCKET_NAME}/${key}`);
 
     return {
