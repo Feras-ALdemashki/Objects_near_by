@@ -5,7 +5,8 @@ const s3 = new S3Client({});
 
 const API_KEY = process.env.API_KEY;
 const BUCKET_NAME = process.env.BUCKET_NAME;
-
+const now = new Date();
+const folderDate = now.toISOString().split("T")[0];
 export const handler = async (event) => {
   try {
     if (!API_KEY) {
@@ -96,7 +97,7 @@ export const handler = async (event) => {
     const csv = [csvHeaders, ...csvData].join("\n");
 
     // upload the data into S3
-    const key = `neo/neo_${startDateStr}_to_${endDateStr}.csv`;
+    const key = `neo/${endDateStr}/neo_${startDateStr}_to_${endDateStr}.csv`;
 
     await s3.send(
       new PutObjectCommand({
