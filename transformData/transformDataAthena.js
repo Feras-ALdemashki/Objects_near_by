@@ -12,40 +12,15 @@ const DATA_BASE_NAME = process.env.DATA_BASE_NAME;
 const s3 = new S3Client({});
 const athena = new AthenaClient({});
 
-// build CREATE TABLE SQL for a given folder date
-const createTableSql = (folderDate) => {
-  return `
-CREATE EXTERNAL TABLE IF NOT EXISTS ${DATA_BASE_NAME}.neo_raw_data (
-  approach_date string,
-  epoch_date_close_approach bigint,
-  neo_id string,
-  neo_reference_id string,
-  name string,
-  nasa_jpl_url string,
-  absolute_magnitude_h double,
-  estimated_diameter_min_km double,
-  estimated_diameter_max_km double,
-  is_potentially_hazardous_asteroid boolean,
-  is_sentry_object boolean,
-  relative_velocity_km_s double,
-  relative_velocity_km_h double,
-  miss_distance_km double,
-  miss_distance_lunar double,
-  orbiting_body string
-)
-ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
-WITH SERDEPROPERTIES (
-  "separatorChar" = ",",
-  "quoteChar" = "\""
-)
-LOCATION 's3://${BUCKET_NAME}/neo/${folderDate}/'
-TBLPROPERTIES ("skip.header.line.count"="1");
-`;
-};
-
-// query to transform data
-const transformDataQuery = `
-WITH stats AS (
+const buildTransformDataQuery = (folderDate) => `
+WITH filtered AS (
+  SELECT *
+  FROM neo_raw_data
+  WHERE CAST(approach_date AS date)
+        BETWEEN date_add('day', -6, date '${folderDate}')
+            AND date '${folderDate}'
+),
+stats AS (
   SELECT
     COUNT_IF(orbiting_body = 'Earth') AS total_in_earth_orbit,
     COUNT_IF(orbiting_body = 'Earth' AND miss_distance_lunar < 5) AS under_5_lunar_close,
@@ -58,13 +33,13 @@ WITH stats AS (
         ELSE NULL
       END
     ) AS avg_size_earth_orbit_km
-  FROM neo_raw_data
+  FROM filtered
 ),
 biggest AS (
   SELECT
     name AS biggest_earth_object_name,
     estimated_diameter_max_km AS biggest_earth_object_diameter_km
-  FROM neo_raw_data
+  FROM filtered
   WHERE orbiting_body = 'Earth'
   ORDER BY estimated_diameter_max_km DESC
   LIMIT 1
@@ -73,7 +48,7 @@ smallest AS (
   SELECT
     name AS smallest_earth_object_name,
     estimated_diameter_max_km AS smallest_earth_object_diameter_km
-  FROM neo_raw_data
+  FROM filtered
   WHERE orbiting_body = 'Earth'
   ORDER BY estimated_diameter_max_km ASC
   LIMIT 1
@@ -93,8 +68,8 @@ CROSS JOIN biggest
 CROSS JOIN smallest
 `;
 
-// run an Athena query: start, poll until finished, then return GetQueryResults
-const queryStart = async (q) => {
+// Run an Athena query: start, poll until finished, then return GetQueryResults
+const runAthenaQuery = async (q) => {
   const startRes = await athena.send(
     new StartQueryExecutionCommand({
       QueryString: q,
@@ -146,12 +121,11 @@ export const handler = async (event) => {
     const now = new Date();
     const folderDate = now.toISOString().split("T")[0];
 
-    const createTableSqlQuery = createTableSql(folderDate);
-    await queryStart(createTableSqlQuery);
-    console.log("Table neo_raw_data created/updated");
+    const transformDataQuery = buildTransformDataQuery(folderDate);
+    console.log("Running metrics query:\n", transformDataQuery);
 
-    const response = await queryStart(transformDataQuery);
-    // to get the result of the query
+    const response = await runAthenaQuery(transformDataQuery);
+
     const rows = response.ResultSet.Rows || [];
     if (rows.length < 2) {
       throw new Error("Metrics query returned no data rows");
@@ -169,7 +143,6 @@ export const handler = async (event) => {
 
     console.log("Metrics CSV:\n", csv);
 
-    //  store in S3
     const key = `neo/transformed/${folderDate}.csv`;
 
     await s3.send(
